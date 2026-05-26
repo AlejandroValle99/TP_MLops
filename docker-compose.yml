@@ -44,10 +44,6 @@ services:
     build: './postgres'
     image: postgres_system
     container_name: postgres
-    profiles:
-      - airflow
-      - mlflow
-      - all
     ports:
       - "${PG_PORT:-5432}:5432"
     networks:
@@ -70,10 +66,6 @@ services:
   valkey:
     image: valkey/valkey:latest
     restart: always
-    profiles:
-      - airflow
-      - mlflow
-      - all
     ports:
       - "${VALKEY_PORT:-6379}:6379"
     volumes:
@@ -86,10 +78,6 @@ services:
     restart: always
     image: minio/minio:latest
     container_name: minio
-    profiles:
-      - airflow
-      - mlflow
-      - all
     ports:
       - "${MINIO_PORT:-9000}:9000"
       - "${MINIO_PORT_UI:-9001}:9001"
@@ -111,10 +99,6 @@ services:
   create_s3_buckets:
     image: minio/mc:latest
     container_name: minio_create_bucket
-    profiles:
-      - airflow
-      - mlflow
-      - all
     depends_on:
       - s3
     networks:
@@ -130,10 +114,6 @@ services:
   copy_data_to_s3:
     build: "./minio"
     container_name: minio_copy_bucket
-    profiles:
-      - airflow
-      - mlflow
-      - all
     depends_on:
       create_s3_buckets:
         condition: service_completed_successfully
@@ -152,9 +132,6 @@ services:
     build: "./mlflow"
     image: mlflow
     container_name: mlflow
-    profiles:
-      - mlflow
-      - all
     depends_on:
       postgres:
         condition: service_healthy
