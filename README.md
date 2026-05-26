@@ -44,7 +44,7 @@ Recomendaciones
 
 Cómo arrancar el entorno
 ```bash
-docker-compose --profile all up --build
+docker compose up --build
 ```
 
 Acceso a servicios
