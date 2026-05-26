@@ -2,10 +2,14 @@
 name = "tp-mlops"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.115.0",
+    "joblib>=1.4.0",
+    "mlflow>=2.14.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "scikit-learn>=1.4.0",
 ]
 
 [dependency-groups]
