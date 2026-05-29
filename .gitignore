@@ -18,8 +18,11 @@ build/
 # Virtual environment (uv)
 .venv/
 
-# uv
-uv.lock
+# MLflow
+mlruns/
+
+# Trained model artifacts (se gestionan via MLflow)
+models/
 
 # Tool caches
 .mypy_cache/
