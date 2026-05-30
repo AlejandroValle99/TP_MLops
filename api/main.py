@@ -1,6 +1,8 @@
 """FastAPI app — stroke prediction service."""
 
+import io
 import os
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -8,7 +10,9 @@ import mlflow
 import mlflow.sklearn
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
+from api.data import apply_mutations, fetch_dataset
 from api.schemas import StrokeInput, StrokePrediction
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
@@ -19,7 +23,7 @@ _model: Any = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     global _model
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     try:
@@ -55,6 +59,25 @@ def predict(data: StrokeInput) -> StrokePrediction:
     prob = float(_model.predict_proba(df)[0, 1])
     pred = int(prob >= 0.5)
     return StrokePrediction(stroke_prediction=pred, stroke_probability=prob)
+
+
+@app.get("/dataset")
+def dataset() -> StreamingResponse:
+    try:
+        df = fetch_dataset()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Could not fetch dataset from MinIO: {exc}"
+        ) from exc
+    df = apply_mutations(df)
+    buf = io.StringIO()
+    df.to_csv(buf, index=False)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=dataset.csv"},
+    )
 
 
 if __name__ == "__main__":

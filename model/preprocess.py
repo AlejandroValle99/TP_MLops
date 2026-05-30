@@ -1,5 +1,11 @@
+import io
+import os
+from urllib.parse import urlparse
+
+import boto3
 import numpy as np
 import pandas as pd
+from botocore.client import Config
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -104,9 +110,25 @@ def build_feature_pipeline() -> Pipeline:
     )
 
 
+def _read_csv(csv_path: str) -> pd.DataFrame:
+    if not csv_path.startswith("s3://"):
+        return pd.read_csv(csv_path)
+    parsed = urlparse(csv_path)
+    client = boto3.client(
+        "s3",
+        endpoint_url=os.getenv("MLFLOW_S3_ENDPOINT_URL", "http://minio:9000"),
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        config=Config(signature_version="s3v4"),
+        region_name="us-east-1",
+    )
+    obj = client.get_object(Bucket=parsed.netloc, Key=parsed.path.lstrip("/"))
+    return pd.read_csv(io.BytesIO(obj["Body"].read()))
+
+
 def load_data(csv_path: str) -> tuple[pd.DataFrame, pd.Series]:
     """Loads raw CSV, drops id and gender='Other' rows, returns (X, y)."""
-    df = pd.read_csv(csv_path)
+    df = _read_csv(csv_path)
     df = df.drop(columns=["id"])
     df = df[df["gender"] != "Other"]
     X = df.drop(columns=[TARGET])

@@ -1,7 +1,6 @@
 """Train the stroke prediction Random Forest and log the run to MLflow."""
 
 import os
-from pathlib import Path
 
 import mlflow
 import mlflow.sklearn
@@ -19,7 +18,7 @@ from sklearn.pipeline import Pipeline
 
 from model.preprocess import build_feature_pipeline, load_data
 
-DATA_PATH = Path(os.getenv("DATA_PATH", "data/healthcare-dataset-stroke-data.csv"))
+DATA_PATH = os.getenv("DATA_PATH", "data/healthcare-dataset-stroke-data.csv")
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 EXPERIMENT_NAME = "stroke-prediction"
 REGISTERED_MODEL_NAME = "stroke-model"
@@ -69,7 +68,7 @@ def train() -> None:
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     experiment_id = _get_or_create_experiment(EXPERIMENT_NAME)
 
-    X, y = load_data(str(DATA_PATH))
+    X, y = load_data(DATA_PATH)
 
     X_train, X_temp, y_train, y_temp = train_test_split(
         X,
@@ -120,19 +119,22 @@ def train() -> None:
             registered_model_name=REGISTERED_MODEL_NAME,
         )
 
-    # Promote the latest version to the champion alias
-    client = mlflow.MlflowClient()
-    versions = client.search_model_versions(
-        f"name='{REGISTERED_MODEL_NAME}'",
-        max_results=1,
-        order_by=["version_number DESC"],
-    )
-    if versions:
-        new_version = versions[0].version
-        client.set_registered_model_alias(REGISTERED_MODEL_NAME, CHAMPION_ALIAS, new_version)
-        print(
-            f"Modelo '{REGISTERED_MODEL_NAME}' v{new_version} promovido a alias '{CHAMPION_ALIAS}'"
+        # Promote the latest version to the champion alias
+        client = mlflow.MlflowClient()
+        versions = client.search_model_versions(
+            f"name='{REGISTERED_MODEL_NAME}'",
+            max_results=1,
+            order_by=["version_number DESC"],
         )
+        if versions:
+            new_version = versions[0].version
+            client.set_registered_model_alias(
+                REGISTERED_MODEL_NAME, CHAMPION_ALIAS, new_version
+            )
+            print(
+                f"Modelo '{REGISTERED_MODEL_NAME}' v{new_version} "
+                f"promovido a alias '{CHAMPION_ALIAS}'"
+            )
 
     print("=== Validación ===")
     for k, v in val_metrics.items():
