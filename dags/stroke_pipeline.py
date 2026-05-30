@@ -1,10 +1,13 @@
 """DAG de Airflow — pipeline de entrenamiento del modelo de stroke."""
 
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+
+DATA_SERVICE_URL = os.getenv("DATA_SERVICE_URL", "http://api:8000")
 
 default_args = {
     "owner": "mlops-fiuba",
@@ -13,13 +16,33 @@ default_args = {
 }
 
 
+def fetch_data() -> None:
+    """Downloads a fresh dataset snapshot from the API."""
+    import urllib.request
+
+    data_path = os.getenv(
+        "DATA_PATH", "/opt/airflow/data/healthcare-dataset-stroke-data.csv"
+    )
+    url = f"{DATA_SERVICE_URL}/dataset"
+
+    with urllib.request.urlopen(url) as response:
+        if response.status != 200:
+            raise RuntimeError(f"/dataset returned HTTP {response.status}")
+        content = response.read()
+
+    Path(data_path).write_bytes(content)
+    print(f"Dataset escrito en {data_path} ({len(content)} bytes)")
+
+
 def validate_data() -> None:
     """Verifica que el dataset exista y tenga el esquema esperado."""
     import os
 
     import pandas as pd
 
-    data_path = Path(os.getenv("DATA_PATH", "/opt/airflow/data/healthcare-dataset-stroke-data.csv"))
+    data_path = Path(
+        os.getenv("DATA_PATH", "/opt/airflow/data/healthcare-dataset-stroke-data.csv")
+    )
 
     if not data_path.exists():
         raise FileNotFoundError(f"Dataset no encontrado: {data_path}")
@@ -67,6 +90,8 @@ with DAG(
     catchup=False,
     tags=["stroke", "mlops", "training"],
 ) as dag:
+    task_fetch = PythonOperator(task_id="fetch_data", python_callable=fetch_data)
+
     task_validate = PythonOperator(
         task_id="validate_data",
         python_callable=validate_data,
@@ -77,4 +102,4 @@ with DAG(
         python_callable=train_model,
     )
 
-    task_validate >> task_train
+    task_fetch >> task_validate >> task_train
