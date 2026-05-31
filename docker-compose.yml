@@ -16,6 +16,7 @@ x-airflow-common: &airflow-common
     AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
     AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
     DATA_PATH: /opt/airflow/data/healthcare-dataset-stroke-data.csv
+    DATA_SERVICE_URL: http://api:8000
     PYTHONPATH: /opt/airflow
   volumes:
     - ./dags:/opt/airflow/dags
@@ -30,7 +31,6 @@ x-airflow-common: &airflow-common
 
 # ─── services ─────────────────────────────────────────────────────────────────
 services:
-
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
   postgres:
     image: postgres:15
@@ -42,7 +42,8 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
+      test:
+        ["CMD", "pg_isready", "-U", "${POSTGRES_USER}", "-d", "${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -58,8 +59,8 @@ services:
     volumes:
       - minio-data:/data
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # MinIO Console
+      - "9000:9000" # S3 API
+      - "9001:9001" # MinIO Console
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
@@ -74,11 +75,15 @@ services:
       minio:
         condition: service_healthy
     entrypoint: /bin/sh
+    volumes:
+      - ./data:/data
     command:
       - -c
       - |
         mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}
         mc mb --ignore-existing local/mlflow-artifacts
+        mc mb --ignore-existing local/datasets
+        mc cp /data/ local/datasets/
     restart: "no"
 
   # ── MLflow tracking server ──────────────────────────────────────────────────
@@ -93,14 +98,20 @@ services:
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "5000:5000"
+      - "5001:5000"
     depends_on:
       postgres:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/')"]
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/')",
+        ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -150,6 +161,24 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  model-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      DATA_PATH: s3://datasets/healthcare-dataset-stroke-data.csv
+    command: python -m model.train
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    restart: "no"
+
   # ── FastAPI serving ─────────────────────────────────────────────────────────
   api:
     build:
@@ -162,11 +191,17 @@ services:
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       MODEL_NAME: ${MODEL_NAME}
       MODEL_ALIAS: ${MODEL_ALIAS}
+      DATASET_BUCKET: datasets
+      DATASET_KEY: healthcare-dataset-stroke-data.csv
+      MUTATION_SAMPLE_RATE: "0.80"
+      MUTATION_NOISE_STD: "0.03"
     ports:
       - "8000:8000"
     depends_on:
       mlflow:
         condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 # ─── volumes ──────────────────────────────────────────────────────────────────
