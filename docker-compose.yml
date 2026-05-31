@@ -83,7 +83,7 @@ services:
         mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}
         mc mb --ignore-existing local/mlflow-artifacts
         mc mb --ignore-existing local/datasets
-        mc cp /data/healthcare-dataset-stroke-data.csv local/datasets/healthcare-dataset-stroke-data.csv
+        mc cp /data/ local/datasets/
     restart: "no"
 
   # ── MLflow tracking server ──────────────────────────────────────────────────
