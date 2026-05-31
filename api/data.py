@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from botocore.client import Config
 
-DATASET_BUCKET = os.getenv("DATA_SET_BUCKET", "datasets")
+DATASET_BUCKET = os.getenv("DATASET_BUCKET", "datasets")
 DATASET_KEY = os.getenv("DATASET_KEY", "healthcare-dataset-stroke-data.csv")
 MUTATION_SAMPLE_RATE = float(os.getenv("MUTATION_SAMPLE_RATE", "0.80"))
 MUTATION_NOISE_STD = float(os.getenv("MUTATION_NOISE_STD", "0.03"))
