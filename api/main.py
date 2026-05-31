@@ -10,6 +10,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 
 from api.schemas import StrokeInput, StrokePrediction
+from mlflow.tracking import MlflowClient
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 MODEL_NAME = os.getenv("MODEL_NAME", "stroke-model")
@@ -42,6 +43,36 @@ def health() -> dict:
             status_code=503, detail={"status": "unavailable", "model_loaded": False}
         )
     return {"status": "ok", "model_loaded": True}
+
+
+@app.get("/model-info")
+def model_info() -> dict:
+    try:
+        client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
+
+        model = client.get_model_version_by_alias(
+            MODEL_NAME, 
+            MODEL_ALIAS
+        )
+
+        run = client.get_run(model.run_id)
+        
+        return {
+            "model_name": MODEL_NAME,
+            "model_alias": MODEL_ALIAS,
+            "model_version": model.version,
+            "model_run_id": model.run_id,
+            "test_f2": run.data.metrics.get("test_f2"),
+            "test_recall": run.data.metrics.get("test_recall"),
+            "test_precision": run.data.metrics.get("test_precision"),
+            "test_roc_auc": run.data.metrics.get("test_roc_auc"),
+        }
+    
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al obtener información del modelo: {exc}"
+        )
 
 
 @app.post("/predict", response_model=StrokePrediction)
