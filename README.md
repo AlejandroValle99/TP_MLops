@@ -1,4 +1,11 @@
 # TP MLOps — Predicción de Stroke
+Integrantes del grupo:
+
+Gabriela Sol Salazar
+Christian Aballay
+Leonardo Villalva
+Alejandro A. Valle
+Marina Gaitán 
 
 Pipeline de MLOps para predecir riesgo de ACV (stroke) sobre el [Stroke Prediction Dataset](https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset). Todo el sistema corre en contenedores Docker con un único comando.
 
