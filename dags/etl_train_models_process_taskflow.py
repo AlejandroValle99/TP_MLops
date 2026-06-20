@@ -320,8 +320,6 @@ def process_etl_taskflow():
         dt_best = DecisionTreeClassifier(**dt_best_params).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo de árbol de decisión creado.")
-        logging.info("✅ Parámetros del modelo de árbol de decisión:")
-        mlflow.log_params(dt_best_params)
 
         X_val = pd.read_csv(X_val_path)
         y_val = pd.read_csv(y_val_path)
@@ -351,6 +349,7 @@ def process_etl_taskflow():
             tags={"model": "decision_tree", "type": "evaluation"},
         ):
             logging.info("✅ Log de modelo de árbol de decisión en MLflow")
+            mlflow.log_params(dt_best_params)
             mlflow.sklearn.log_model(sk_model=dt_best, name="decision_tree_model")
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo de árbol de decisión y métricas registrados en MLflow")
@@ -505,8 +504,6 @@ def process_etl_taskflow():
         rf_best = RandomForestClassifier(**rf_best_params).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo de bosque aleatorio creado.")
-        logging.info("✅ Parámetros del modelo de bosque aleatorio:")
-        mlflow.log_params(rf_best_params)
 
         X_val = pd.read_csv(X_val_path)
         y_val = pd.read_csv(y_val_path)
@@ -536,6 +533,7 @@ def process_etl_taskflow():
             tags={"model": "random_forest", "type": "evaluation"},
         ):
             logging.info("✅ Log de modelo de random forest en MLflow")
+            mlflow.log_params(rf_best_params)
             mlflow.sklearn.log_model(sk_model=rf_best, name="random_forest_model")
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo de random forest y métricas registrados en MLflow")
