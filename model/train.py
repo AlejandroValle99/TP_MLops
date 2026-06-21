@@ -117,6 +117,10 @@ def train() -> None:
             "stroke-model",
             input_example=X_train.head(1),
             registered_model_name=REGISTERED_MODEL_NAME,
+            skops_trusted_types=[
+                "model.preprocess._BMIGroupImputer",
+                "model.preprocess._StrokeCleaner",
+            ],
         )
 
         # Promote the latest version to the champion alias

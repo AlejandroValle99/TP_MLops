@@ -8,7 +8,8 @@ RUN pip install --no-cache-dir \
     "pandas>=2.2.0" \
     "numpy>=1.26.0" \
     "mlflow>=2.15.0" \
-    boto3
+    "optuna>=4.3.0" \
+    "boto3"
 
 COPY api/ ./api/
 COPY model/ ./model/
