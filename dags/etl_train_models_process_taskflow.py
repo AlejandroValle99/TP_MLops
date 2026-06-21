@@ -20,6 +20,7 @@ DIR_DATA_PROCESSED = os.getenv("DIR_DATA_PROCESSED", "processed/final")
 BUCKET = "mlflow-artifacts"
 
 default_args = {
+    "owner": "mlops-fiuba",
     "depends_on_past": False,
     "schedule_interval": None,
     "retries": 1,
@@ -36,14 +37,17 @@ default_args = {
     tags=["ETL", "TaskFlow"],
 )
 def process_etl_taskflow():
-    def create_experiment(experiment_name, model):
-        """Create a new MLFlow experiment with a specified name.
-        Save artifacts to the specified S3 bucket."""
+    def connect_mlflow():
         import mlflow
 
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-
         logging.info("Conectado a MLflow Tracking Server")
+        return mlflow
+
+    def create_experiment(experiment_name, model):
+        """Create a new MLFlow experiment with a specified name.
+        Save artifacts to the specified S3 bucket."""
+        mlflow = connect_mlflow()
 
         if not mlflow.get_experiment_by_name(experiment_name):
             logging.info(f"Creando experimento MLflow: {experiment_name}")
@@ -59,6 +63,35 @@ def process_etl_taskflow():
         experiment = mlflow.get_experiment_by_name(experiment_name)
 
         return experiment.experiment_id
+
+    def remove_alias_from_models(target_alias: str):
+        mlflow = connect_mlflow()
+        client = mlflow.MlflowClient()
+        
+        # 1. Page through all registered models in the registry
+        page_token = None
+        while True:
+            # Fetch a page of registered models
+            response = client.search_registered_models(page_token=page_token)
+            
+            for model in response:
+                model_name = model.name
+                try:
+                    # 2. Safely attempt to fetch the model version assigned to that alias
+                    client.delete_registered_model_alias(
+                        name=model_name, 
+                        alias=target_alias
+                    )
+                    
+                except mlflow.exceptions.MlflowException:
+                    # API throws an exception if the alias does not exist for this specific model
+                    continue
+                    
+            # Handle pagination token
+            page_token = response.token
+            if not page_token:
+                break
+
 
     @task.python(task_id="check_data_to_process", multiple_outputs=True)
     def check_data_to_process():
@@ -137,6 +170,8 @@ def process_etl_taskflow():
         logging.info("Iniciando tarea modelo base (baseline) usando solo la edad como predictor...")
 
         experiment_name = "baseline_model_evaluation"
+        registered_model_name = "baseline_model"
+
         experiment_id = create_experiment(experiment_name, model="baseline")
 
         logging.info("Creando modelo base...")
@@ -161,8 +196,6 @@ def process_etl_taskflow():
             "Precision": precision_score(y_val_arr, y_pred_baseline_val, zero_division=0),
         }
 
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-
         logging.info(f"Registrando en MLflow: {experiment_name} (ID: {experiment_id})")
         run_name_base = "base_model_exp"
 
@@ -176,7 +209,7 @@ def process_etl_taskflow():
             tags={"model": "baseline", "type": "evaluation"},
         ):
             logging.info("✅ Log de modelos del modelo base en MLflow")
-            mlflow.sklearn.log_model(sk_model=baseline_model, name=experiment_name)
+            mlflow.sklearn.log_model(sk_model=baseline_model, name="baseline", registered_model_name=registered_model_name)
 
             logging.info("✅ Parámetros del modelo base:")
             mlflow.log_params(baseline_model.get_params())
@@ -191,7 +224,13 @@ def process_etl_taskflow():
             mlflow.log_figure(pr_plots, artifact_file="precision_recall_plot.png")
 
         logging.info("✅ Tarea modelo base finalizada.")
-        return bl_metrics
+        return {
+            "metrics": bl_metrics,
+            "params": baseline_model.get_params(),
+            "experiment_id": experiment_id,
+            "run_name": run_name_base,
+            "registered_model_name": registered_model_name
+        }
 
     @task.python(task_id="create_knn_model", multiple_outputs=True)
     def create_knn_model(X_train_path, y_train_path, X_val_path, y_val_path):
@@ -210,6 +249,7 @@ def process_etl_taskflow():
 
         logging.info(f"Usando experimento MLflow: knn_model_evaluation (ID: {experiment_id})")
         run_name_base = "knn_model_exp"
+        registered_model_name = "knn_model"
 
         X_train = pd.read_csv(X_train_path)
         y_train = pd.read_csv(y_train_path)
@@ -256,7 +296,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_knn_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_knn_val[:, 1], save_path=None)
 
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -265,7 +305,7 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo KNN en MLflow")
             mlflow.log_params(knn_best_params)
-            mlflow.sklearn.log_model(sk_model=knn_best, name="knn_model")
+            mlflow.sklearn.log_model(sk_model=knn_best, name="knn", registered_model_name=registered_model_name)
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelos y métricas KNN registrados en MLflow")
             mlflow.log_figure(matrix_plot, artifact_file="knn_confusion_matrix.png")
@@ -274,7 +314,12 @@ def process_etl_taskflow():
             mlflow.log_figure(pr_plots, artifact_file="knn_precision_recall_curve.png")
 
         logging.info("✅ Tarea modelo KNN finalizada.")
-        return bl_metrics
+        return {
+            "metrics": bl_metrics,
+            "params": knn_best_params,
+            "experiment_id": experiment_id,
+            "run_name": run_name_base,
+        }
 
     @task.python(task_id="create_decision_tree_model", multiple_outputs=True)
     def create_decision_tree_model(X_train_path, y_train_path, X_val_path, y_val_path):
@@ -295,6 +340,7 @@ def process_etl_taskflow():
             f"Usando experimento MLflow: decision_tree_model_evaluation (ID: {experiment_id})"
         )
         run_name_base = "decision_tree_model_exp"
+        registered_model_name = "decision_tree_model"
 
         X_train = pd.read_csv(X_train_path)
         y_train = pd.read_csv(y_train_path)
@@ -317,11 +363,9 @@ def process_etl_taskflow():
         dt_study.optimize(dt_objective, n_trials=50, show_progress_bar=True)
 
         dt_best_params = dt_study.best_params
-        dt_best = DecisionTreeClassifier(**dt_best_params).fit(X_train, y_train_arr)
+        dt_best = DecisionTreeClassifier(class_weight='balanced', random_state=42, **dt_best_params).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo de árbol de decisión creado.")
-        logging.info("✅ Parámetros del modelo de árbol de decisión:")
-        mlflow.log_params(dt_best_params)
 
         X_val = pd.read_csv(X_val_path)
         y_val = pd.read_csv(y_val_path)
@@ -329,6 +373,9 @@ def process_etl_taskflow():
 
         y_prob_dt_val = dt_best.predict_proba(X_val)
         y_pred_dt_val = dt_best.predict(X_val)
+        logging.info("y_val_arr: " + str(y_val_arr[:5]))
+        logging.info("y_prob_dt_val: " + str(y_prob_dt_val[:5]))
+        logging.info("y_pred_dt_val: " + str(y_pred_dt_val[:5]))
 
         bl_metrics = {
             "AUC-ROC": roc_auc_score(y_val_arr, y_prob_dt_val[:, 1]),
@@ -343,7 +390,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_dt_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_dt_val[:, 1], save_path=None)
 
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -351,7 +398,12 @@ def process_etl_taskflow():
             tags={"model": "decision_tree", "type": "evaluation"},
         ):
             logging.info("✅ Log de modelo de árbol de decisión en MLflow")
-            mlflow.sklearn.log_model(sk_model=dt_best, name="decision_tree_model")
+            mlflow.log_params(dt_best_params)
+            mlflow.sklearn.log_model(
+                sk_model=dt_best,
+                name="decision_tree",
+                registered_model_name=registered_model_name
+            )
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo de árbol de decisión y métricas registrados en MLflow")
             mlflow.log_figure(matrix_plot, artifact_file="dt_confusion_matrix.png")
@@ -360,7 +412,13 @@ def process_etl_taskflow():
             mlflow.log_figure(pr_plots, artifact_file="dt_precision_recall_curve.png")
 
         logging.info("✅ Tarea modelo de árbol de decisión finalizada.")
-        return bl_metrics
+        return {
+            "metrics": bl_metrics,
+            "params": dt_best_params,
+            "experiment_id": experiment_id,
+            "run_name": run_name_base,
+            "registered_model_name": registered_model_name
+        }
 
     @task.python(task_id="create_xgboost_model", multiple_outputs=True)
     def create_xgboost_model(X_train_path, y_train_path, X_val_path, y_val_path):
@@ -380,7 +438,8 @@ def process_etl_taskflow():
 
         logging.info(f"Usando experimento MLflow: xgboost_model_evaluation (ID: {experiment_id})")
         run_name_base = "xgboost_model_exp"
-
+        registered_model_name = "xgboost_model"
+        
         X_train = pd.read_csv(X_train_path)
         y_train = pd.read_csv(y_train_path)
         y_train_arr = y_train.to_numpy().ravel()
@@ -439,7 +498,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_xgb_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_xgb_val[:, 1], save_path=None)
 
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -448,7 +507,11 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo XGBoost en MLflow")
             mlflow.log_params(xgb_best_params)
-            mlflow.sklearn.log_model(sk_model=xgb_best, name="xgboost_model")
+            mlflow.sklearn.log_model(
+                sk_model=xgb_best,
+                name="xgboost",
+                registered_model_name=registered_model_name
+            )
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo XGBoost y métricas registrados en MLflow")
             mlflow.log_figure(matrix_plot, artifact_file="xgb_confusion_matrix.png")
@@ -457,7 +520,13 @@ def process_etl_taskflow():
             mlflow.log_figure(pr_plots, artifact_file="xgb_precision_recall_curve.png")
 
         logging.info("✅ Tarea modelo XGBoost finalizada.")
-        return bl_metrics
+        return {
+            "metrics": bl_metrics,
+            "params": xgb_best_params,
+            "experiment_id": experiment_id,
+            "run_name": run_name_base,
+            "registered_model_name": registered_model_name
+        }
 
     @task.python(task_id="create_random_forest_model", multiple_outputs=True)
     def create_random_forest_model(X_train_path, y_train_path, X_val_path, y_val_path):
@@ -478,6 +547,7 @@ def process_etl_taskflow():
             f"Usando experimento MLflow: random_forest_model_evaluation (ID: {experiment_id})"
         )
         run_name_base = "random_forest_model_exp"
+        registered_model_name = "random_forest_model"
 
         X_train = pd.read_csv(X_train_path)
         y_train = pd.read_csv(y_train_path)
@@ -502,11 +572,9 @@ def process_etl_taskflow():
         rf_study.optimize(rf_objective, n_trials=50, show_progress_bar=True)
 
         rf_best_params = rf_study.best_params
-        rf_best = RandomForestClassifier(**rf_best_params).fit(X_train, y_train_arr)
+        rf_best = RandomForestClassifier(class_weight="balanced", random_state=42, n_jobs=-1, **rf_best_params).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo de bosque aleatorio creado.")
-        logging.info("✅ Parámetros del modelo de bosque aleatorio:")
-        mlflow.log_params(rf_best_params)
 
         X_val = pd.read_csv(X_val_path)
         y_val = pd.read_csv(y_val_path)
@@ -519,7 +587,7 @@ def process_etl_taskflow():
             "AUC-ROC": roc_auc_score(y_val_arr, y_prob_rf_val[:, 1]),
             "PR-AUC": average_precision_score(y_val_arr, y_prob_rf_val[:, 1]),
             "F1": f1_score(y_val_arr, y_pred_rf_val),
-            METRIC_NAME: fbeta_score(y_val_arr, y_pred_rf_val, beta=BETA),
+            METRIC_NAME: cv_f2(rf_best, X_val, y_val_arr),
             "Recall": recall_score(y_val_arr, y_pred_rf_val),
             "Precision": precision_score(y_val_arr, y_pred_rf_val, zero_division=0),
         }
@@ -528,7 +596,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_rf_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_rf_val[:, 1], save_path=None)
 
-        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -536,7 +604,12 @@ def process_etl_taskflow():
             tags={"model": "random_forest", "type": "evaluation"},
         ):
             logging.info("✅ Log de modelo de random forest en MLflow")
-            mlflow.sklearn.log_model(sk_model=rf_best, name="random_forest_model")
+            mlflow.log_params(rf_best_params)
+            mlflow.sklearn.log_model(
+                sk_model=rf_best,
+                name="random_forest",
+                registered_model_name=registered_model_name
+            )
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo de random forest y métricas registrados en MLflow")
             mlflow.log_figure(matrix_plot, artifact_file="rf_confusion_matrix.png")
@@ -545,23 +618,93 @@ def process_etl_taskflow():
             mlflow.log_figure(pr_plots, artifact_file="rf_precision_recall_curve.png")
 
         logging.info("✅ Tarea modelo de random forest finalizada.")
-        return bl_metrics
+        return {
+            "metrics": bl_metrics,
+            "params": rf_best_params,
+            "experiment_id": experiment_id,
+            "run_name": run_name_base,
+            "registered_model_name": registered_model_name
+        }
+
+    @task.python(task_id="set_champion_model", multiple_outputs=True)
+    def set_champion_model(metrics_base, metrics_knn, metrics_dt, metrics_xgb, metrics_rf):
+        """
+        Comparamos los modelos entrenados y seleccionamos el mejor (champion) para producción.
+        """
+        import mlflow
+
+        mlflow = connect_mlflow()
+
+        logging.info("Iniciando tarea de selección del modelo campeón...")
+
+        models = [
+            ("baseline", metrics_base),
+            ("knn", metrics_knn),
+            ("decision_tree", metrics_dt),
+            ("xgboost", metrics_xgb),
+            ("random_forest", metrics_rf)
+        ]
+
+        logging.info("Comparando modelos según la métrica principal (F-beta score)...")
+        _, champion_metrics = max(models, key=lambda x: x[1]["metrics"][METRIC_NAME])
+
+        experiment_id = champion_metrics["experiment_id"]
+        run_name = champion_metrics["run_name"]
+        champion_model_name = champion_metrics["registered_model_name"]
+
+        logging.info(f"✅ Modelo campeón seleccionado: {champion_model_name} con {METRIC_NAME}: {champion_metrics["metrics"][METRIC_NAME]:.4f}")
+
+        logging.info("Registrando modelo campeón en MLflow Model Registry...")
+        
+        runs_champion= mlflow.search_runs(
+            experiment_ids=experiment_id,
+            filter_string=f"tags.mlflow.runName = '{run_name}'"   
+        )
+
+        run_id = runs_champion["run_id"].iloc[0]
+
+        logging.info(f"Obteniendo run_id del modelo campeón: {experiment_id} - {run_id}")
+        logged_models = mlflow.search_logged_models(
+            experiment_ids=[experiment_id],
+            filter_string=f"source_run_id='{run_id}'"
+        )
+
+        model_uri = f"models:/{logged_models['model_id'].iloc[0]}"
+
+        remove_alias_from_models("champion")
+
+        client = mlflow.MlflowClient()
+
+        versions = client.search_model_versions(
+            f"name='{champion_model_name}'",
+            max_results=1,
+            order_by=["version_number DESC"],
+        )
+        logging.info(f"Ultima version existentes del modelo campeón '{champion_model_name}': {versions[0].version if versions else 'No hay versiones'}")
+        if versions:
+            new_version = versions[0].version
+            client.set_registered_model_alias(champion_model_name, "champion", new_version)
+            logging.info(
+                f"Modelo '{champion_model_name}' v{new_version} promovido a alias 'champion'"
+            )
+        logging.info("✅ Tarea de selección del modelo campeón finalizada.")
 
     # 🧩 Encadenamiento
     paths = check_data_to_process()
-    create_base_model(paths["X_val_path"], paths["y_val_path"])
-    create_knn_model(
+    metrics_base = create_base_model(paths["X_val_path"], paths["y_val_path"])
+    metrics_knn = create_knn_model(
         paths["X_train_path"], paths["y_train_path"], paths["X_val_path"], paths["y_val_path"]
     )
-    create_decision_tree_model(
+    metrics_dt = create_decision_tree_model(
         paths["X_train_path"], paths["y_train_path"], paths["X_val_path"], paths["y_val_path"]
     )
-    create_xgboost_model(
+    metrics_xgb = create_xgboost_model(
         paths["X_train_path"], paths["y_train_path"], paths["X_val_path"], paths["y_val_path"]
     )
-    create_random_forest_model(
+    metrics_rf = create_random_forest_model(
         paths["X_train_path"], paths["y_train_path"], paths["X_val_path"], paths["y_val_path"]
     )
+    set_champion_model(metrics_base, metrics_knn, metrics_dt, metrics_xgb, metrics_rf)
 
 
 dag = process_etl_taskflow()
