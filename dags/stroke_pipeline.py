@@ -85,7 +85,8 @@ with DAG(
     dag_id="stroke_prediction_pipeline",
     default_args=default_args,
     description="Pipeline de entrenamiento del modelo de prediccion de stroke",
-    schedule=timedelta(weeks=1),
+    #schedule=timedelta(weeks=1),
+    schedule=None,  # manual
     start_date=datetime(2025, 1, 1),
     catchup=False,
     tags=["stroke", "mlops", "training"],

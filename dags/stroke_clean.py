@@ -124,8 +124,8 @@ def validate_source(**context) -> None:
         raise ValueError(f"Faltan columnas en el CSV: {missing_cols}")
 
     logger.info("--/-/-/->Validacion OK — path=%s", data_path)
-    context["ti"].xcom_push(key="data_path", value=data_path)
-
+    #context["ti"].xcom_push(key="data_path", value=data_path)
+    context["ti"].xcom_push(key="data_path",value=str(data_path))
 
 # Tarea 2  load_and_split
 
