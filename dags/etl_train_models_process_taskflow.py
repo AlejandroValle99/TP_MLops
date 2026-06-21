@@ -1,7 +1,9 @@
+#lgv
 import datetime
 import logging
 import os
 
+import mlflow
 import pandas as pd
 from airflow.decorators import dag, task
 from sklearn.metrics import (
@@ -209,8 +211,14 @@ def process_etl_taskflow():
             tags={"model": "baseline", "type": "evaluation"},
         ):
             logging.info("✅ Log de modelos del modelo base en MLflow")
-            mlflow.sklearn.log_model(sk_model=baseline_model, name="baseline", registered_model_name=registered_model_name)
-
+            #mlflow.sklearn.log_model(sk_model=baseline_model, name="baseline", registered_model_name=registered_model_name)
+            mlflow.sklearn.log_model(
+                sk_model=baseline_model,
+                name="baseline",
+                registered_model_name=registered_model_name,
+                skops_trusted_types=["utils.model_utils.AgeBaselineClassifier"],
+            )
+                    
             logging.info("✅ Parámetros del modelo base:")
             mlflow.log_params(baseline_model.get_params())
 
@@ -305,7 +313,20 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo KNN en MLflow")
             mlflow.log_params(knn_best_params)
-            mlflow.sklearn.log_model(sk_model=knn_best, name="knn", registered_model_name=registered_model_name)
+            #mlflow.sklearn.log_model(sk_model=knn_best, name="knn", registered_model_name=registered_model_name)
+            mlflow.sklearn.log_model(
+                sk_model=knn_best,
+                name="knn",
+                registered_model_name=registered_model_name,
+                skops_trusted_types=[
+                    "sklearn.metrics._dist_metrics.ManhattanDistance64",
+                    "sklearn.metrics._dist_metrics.EuclideanDistance64",
+                    "sklearn.neighbors._kd_tree.KDTree",
+                    "sklearn.neighbors._ball_tree.BallTree",
+                ],
+            )
+
+
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelos y métricas KNN registrados en MLflow")
             mlflow.log_figure(matrix_plot, artifact_file="knn_confusion_matrix.png")
@@ -402,7 +423,11 @@ def process_etl_taskflow():
             mlflow.sklearn.log_model(
                 sk_model=dt_best,
                 name="decision_tree",
-                registered_model_name=registered_model_name
+                registered_model_name=registered_model_name,
+                skops_trusted_types=[
+                    "sklearn.tree._classes.DecisionTreeClassifier",
+                    "sklearn.tree._tree.Tree",
+                ],
             )
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo de árbol de decisión y métricas registrados en MLflow")
@@ -507,10 +532,15 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo XGBoost en MLflow")
             mlflow.log_params(xgb_best_params)
-            mlflow.sklearn.log_model(
-                sk_model=xgb_best,
-                name="xgboost",
-                registered_model_name=registered_model_name
+            #mlflow.sklearn.log_model(
+            #    sk_model=xgb_best,
+            #    name="xgboost",
+            #    registered_model_name=registered_model_name
+            #)
+            mlflow.xgboost.log_model(
+            xgb_model=xgb_best,
+            name="xgboost",
+            registered_model_name=registered_model_name
             )
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo XGBoost y métricas registrados en MLflow")
@@ -608,7 +638,12 @@ def process_etl_taskflow():
             mlflow.sklearn.log_model(
                 sk_model=rf_best,
                 name="random_forest",
-                registered_model_name=registered_model_name
+                registered_model_name=registered_model_name,
+                skops_trusted_types=[
+                    "sklearn.ensemble._forest.RandomForestClassifier",
+                    "sklearn.tree._classes.DecisionTreeClassifier",
+                    "sklearn.tree._tree.Tree",
+                ],
             )
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo de random forest y métricas registrados en MLflow")
