@@ -1,11 +1,12 @@
 # TP MLOps — Predicción de Stroke
+
 Integrantes del grupo:
 
 Gabriela Sol Salazar
 Christian Aballay
 Leonardo Villalva
 Alejandro A. Valle
-Mariel Gaitán 
+Mariel Gaitán
 
 Pipeline de MLOps para predecir riesgo de ACV (stroke) sobre el [Stroke Prediction Dataset](https://www.kaggle.com/datasets/fedesoriano/stroke-prediction-dataset). Todo el sistema corre en contenedores Docker con un único comando.
 
@@ -38,13 +39,13 @@ Pipeline de MLOps para predecir riesgo de ACV (stroke) sobre el [Stroke Predicti
 
 ### Servicios
 
-| Servicio | Puerto | Rol |
-|---|---|---|
-| **FastAPI** | 8000 | Sirve predicciones; carga el modelo `champion` desde MLflow al iniciar |
-| **Airflow webserver** | 8080 | UI de orquestación; ejecuta los DAGs de entrenamiento |
-| **MLflow** | 5001 | Tracking de experimentos, métricas, parámetros y model registry |
-| **MinIO** | 9000 / 9001 | Artifact store S3-compatible; guarda modelos entrenados y el dataset |
-| **PostgreSQL** | 5432 | Backend de metadatos de Airflow y MLflow |
+| Servicio              | Puerto      | Rol                                                                    |
+| --------------------- | ----------- | ---------------------------------------------------------------------- |
+| **FastAPI**           | 8000        | Sirve predicciones; carga el modelo `champion` desde MLflow al iniciar |
+| **Airflow webserver** | 8080        | UI de orquestación; ejecuta los DAGs de entrenamiento                  |
+| **MLflow**            | 5001        | Tracking de experimentos, métricas, parámetros y model registry        |
+| **MinIO**             | 9000 / 9001 | Artifact store S3-compatible; guarda modelos entrenados y el dataset   |
+| **PostgreSQL**        | 5432        | Backend de metadatos de Airflow y MLflow                               |
 
 ### Secuencia de arranque
 
@@ -118,12 +119,12 @@ docker compose up -d
 
 La primera vez tarda varios minutos porque construye las imágenes de Airflow y MLflow. Una vez que todos los servicios están `healthy`:
 
-| Interfaz | URL | Usuario | Contraseña |
-|---|---|---|---|
-| API docs | http://localhost:8000/docs | — | — |
-| Airflow | http://localhost:8080 | admin | admin |
-| MLflow | http://localhost:5001 | — | — |
-| MinIO Console | http://localhost:9001 | minioadmin | minioadmin_secret |
+| Interfaz      | URL                        | Usuario    | Contraseña        |
+| ------------- | -------------------------- | ---------- | ----------------- |
+| API docs      | http://localhost:8000/docs | —          | —                 |
+| Airflow       | http://localhost:8080      | admin      | admin             |
+| MLflow        | http://localhost:5001      | —          | —                 |
+| MinIO Console | http://localhost:9001      | minioadmin | minioadmin_secret |
 
 ### 3. Verificar el estado
 
@@ -141,27 +142,27 @@ La API carga el modelo con alias `champion` desde MLflow al iniciar. Si no hay m
 
 ### Endpoints
 
-| Método | Ruta | Descripción |
-|---|---|---|
-| GET | `/health` | Estado del servicio y si el modelo está cargado |
-| GET | `/model-info` | Versión activa, run_id y métricas del modelo champion |
-| POST | `/predict` | Recibe datos de un paciente y devuelve predicción y probabilidad |
-| GET | `/dataset` | Descarga el dataset desde MinIO con mutaciones aplicadas |
+| Método | Ruta          | Descripción                                                      |
+| ------ | ------------- | ---------------------------------------------------------------- |
+| GET    | `/health`     | Estado del servicio y si el modelo está cargado                  |
+| GET    | `/model-info` | Versión activa, run_id y métricas del modelo champion            |
+| POST   | `/predict`    | Recibe datos de un paciente y devuelve predicción y probabilidad |
+| GET    | `/dataset`    | Descarga el dataset desde MinIO con mutaciones aplicadas         |
 
 ### Campos de entrada para `/predict`
 
-| Campo | Tipo | Valores válidos |
-|---|---|---|
-| `gender` | string | `"Male"`, `"Female"` |
-| `age` | float | > 0 |
-| `hypertension` | int | `0`, `1` |
-| `heart_disease` | int | `0`, `1` |
-| `ever_married` | string | `"Yes"`, `"No"` |
-| `work_type` | string | `"Private"`, `"Self-employed"`, `"Govt_job"`, `"children"`, `"Never_worked"` |
-| `Residence_type` | string | `"Urban"`, `"Rural"` |
-| `avg_glucose_level` | float | > 0 |
-| `bmi` | float \| null | > 0, acepta null |
-| `smoking_status` | string | `"never smoked"`, `"formerly smoked"`, `"smokes"`, `"Unknown"` |
+| Campo               | Tipo          | Valores válidos                                                              |
+| ------------------- | ------------- | ---------------------------------------------------------------------------- |
+| `gender`            | string        | `"Male"`, `"Female"`                                                         |
+| `age`               | float         | > 0                                                                          |
+| `hypertension`      | int           | `0`, `1`                                                                     |
+| `heart_disease`     | int           | `0`, `1`                                                                     |
+| `ever_married`      | string        | `"Yes"`, `"No"`                                                              |
+| `work_type`         | string        | `"Private"`, `"Self-employed"`, `"Govt_job"`, `"children"`, `"Never_worked"` |
+| `Residence_type`    | string        | `"Urban"`, `"Rural"`                                                         |
+| `avg_glucose_level` | float         | > 0                                                                          |
+| `bmi`               | float \| null | > 0, acepta null                                                             |
+| `smoking_status`    | string        | `"never smoked"`, `"formerly smoked"`, `"smokes"`, `"Unknown"`               |
 
 ### Ejemplo
 
@@ -214,11 +215,11 @@ La comparación deja directamente el modelo `champion` que sirve la API, así qu
 fetch_data ──▶ validate_data ──▶ train_model
 ```
 
-| Tarea | Qué hace |
-|---|---|
-| `fetch_data` | Llama al endpoint `/dataset` de la API, que devuelve el CSV desde MinIO con mutaciones aplicadas, y lo escribe en disco |
-| `validate_data` | Verifica columnas correctas y mínimo 100 filas |
-| `train_model` | Entrena el Random Forest, loggea métricas en MLflow y promueve el modelo como `champion` |
+| Tarea           | Qué hace                                                                                                                |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `fetch_data`    | Llama al endpoint `/dataset` de la API, que devuelve el CSV desde MinIO con mutaciones aplicadas, y lo escribe en disco |
+| `validate_data` | Verifica columnas correctas y mínimo 100 filas                                                                          |
+| `train_model`   | Entrena el Random Forest, loggea métricas en MLflow y promueve el modelo como `champion`                                |
 
 Este DAG es el pipeline "vivo". Para triggerearlo manualmente: **Airflow UI → stroke_prediction_pipeline → ▶ Trigger DAG**.
 
@@ -336,9 +337,3 @@ El pipeline ya es cohesivo de extremo a extremo:
 - **Encadenado limpieza → comparación** mediante el DAG orquestador `0_stroke_full_pipeline`.
 - **Champion automático**: `set_champion_model` (DAG 3) promueve el ganador por F2 directamente sobre `stroke-model@champion`, que es lo que sirve la API.
 - **Preprocessing unificado**: hay una única implementación (`model/preprocess.py::build_feature_pipeline`), usada tanto por el entrenamiento de producción como dentro del Pipeline de cada modelo del DAG 3. El DAG 2 ya no preprocesa: solo particiona datos crudos.
-
-### Otras mejoras
-
-- **Recarga del modelo en la API sin restart**: implementar un endpoint `/reload-model` o un mecanismo de polling para que la API detecte automáticamente cuando hay un nuevo `champion` en MLflow
-- **Tests de integración**: agregar tests que verifiquen el contrato del endpoint `/predict` y la consistencia entre el preprocessing del pipeline y el de la API
-- **Monitoreo de drift**: integrar una herramienta como Evidently para detectar drift entre el dataset con el que se entrenó y los datos que llegan vía `/dataset` en cada ciclo semanal
