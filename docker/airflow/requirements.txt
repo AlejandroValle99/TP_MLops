@@ -1,9 +1,13 @@
-scikit-learn>=1.5.0
-pandas>=2.2.0
-numpy>=1.26.0
-mlflow>=2.15.0
+# Las librerías de serialización (scikit-learn, xgboost, mlflow, numpy) se pinean
+# EXACTO a las versiones del lock de la imagen de la API (pyproject/uv.lock).
+# El modelo se picklea en la imagen de Airflow (DAG de comparación) y se carga en
+# la imagen de la API: cualquier desalineación de versión rompe mlflow.sklearn.load_model.
+scikit-learn==1.8.0
+xgboost==3.3.0
+mlflow==3.12.0
+numpy==2.4.6
+pandas==2.3.3
 boto3>=1.35.0
 psycopg2-binary>=2.9.9
 optuna>=4.8.0
-xgboost>=3.2.0
 matplotlib>=3.9.0
