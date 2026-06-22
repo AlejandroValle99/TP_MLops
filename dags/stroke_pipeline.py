@@ -20,9 +20,7 @@ def fetch_data() -> None:
     """Downloads a fresh dataset snapshot from the API."""
     import urllib.request
 
-    data_path = os.getenv(
-        "DATA_PATH", "/opt/airflow/data/healthcare-dataset-stroke-data.csv"
-    )
+    data_path = os.getenv("DATA_PATH", "/opt/airflow/data/healthcare-dataset-stroke-data.csv")
     url = f"{DATA_SERVICE_URL}/dataset"
 
     with urllib.request.urlopen(url) as response:
@@ -40,9 +38,7 @@ def validate_data() -> None:
 
     import pandas as pd
 
-    data_path = Path(
-        os.getenv("DATA_PATH", "/opt/airflow/data/healthcare-dataset-stroke-data.csv")
-    )
+    data_path = Path(os.getenv("DATA_PATH", "/opt/airflow/data/healthcare-dataset-stroke-data.csv"))
 
     if not data_path.exists():
         raise FileNotFoundError(f"Dataset no encontrado: {data_path}")
@@ -85,7 +81,7 @@ with DAG(
     dag_id="stroke_prediction_pipeline",
     default_args=default_args,
     description="Pipeline de entrenamiento del modelo de prediccion de stroke",
-    #schedule=timedelta(weeks=1),
+    # schedule=timedelta(weeks=1),
     schedule=None,  # manual
     start_date=datetime(2025, 1, 1),
     catchup=False,

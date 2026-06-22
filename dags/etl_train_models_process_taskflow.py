@@ -1,4 +1,4 @@
-#lgv
+# lgv
 import datetime
 import logging
 import os
@@ -14,8 +14,19 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.pipeline import Pipeline
 from utils.model_utils import BETA, METRIC_NAME, cv_f2
 from utils.s3_utils import get_s3_client, s3_file_exists, s3_to_dataframe
+
+from model.preprocess import build_feature_pipeline
+
+# Clases custom del preprocessing/baseline que skops debe confiar al (de)serializar
+PREPROCESS_TRUSTED_TYPES = [
+    "model.preprocess._StrokeCleaner",
+    "model.preprocess._BMIGroupImputer",
+]
+# Nombre del modelo registrado que sirve la API (models:/stroke-model@champion)
+SERVING_MODEL_NAME = "stroke-model"
 
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
 DIR_DATA_PROCESSED = os.getenv("DIR_DATA_PROCESSED", "processed/final")
@@ -40,7 +51,6 @@ default_args = {
 )
 def process_etl_taskflow():
     def connect_mlflow():
-        import mlflow
 
         mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
         logging.info("Conectado a MLflow Tracking Server")
@@ -65,35 +75,6 @@ def process_etl_taskflow():
         experiment = mlflow.get_experiment_by_name(experiment_name)
 
         return experiment.experiment_id
-
-    def remove_alias_from_models(target_alias: str):
-        mlflow = connect_mlflow()
-        client = mlflow.MlflowClient()
-        
-        # 1. Page through all registered models in the registry
-        page_token = None
-        while True:
-            # Fetch a page of registered models
-            response = client.search_registered_models(page_token=page_token)
-            
-            for model in response:
-                model_name = model.name
-                try:
-                    # 2. Safely attempt to fetch the model version assigned to that alias
-                    client.delete_registered_model_alias(
-                        name=model_name, 
-                        alias=target_alias
-                    )
-                    
-                except mlflow.exceptions.MlflowException:
-                    # API throws an exception if the alias does not exist for this specific model
-                    continue
-                    
-            # Handle pagination token
-            page_token = response.token
-            if not page_token:
-                break
-
 
     @task.python(task_id="check_data_to_process", multiple_outputs=True)
     def check_data_to_process():
@@ -160,12 +141,13 @@ def process_etl_taskflow():
         }
 
     @task.python(task_id="create_base_model", multiple_outputs=True)
-    def create_base_model(X_val_path, y_val_path):
+    def create_base_model(X_train_path, y_train_path, X_val_path, y_val_path):
         """
         Creamos un modelo base simple (baseline) para comparar con el modelo
         entrenado posteriormente. Clasificador que solo usa la edad como predictor.
+        Se envuelve en un Pipeline con el preprocessing unificado para que el
+        artefacto registrado reciba datos crudos (igual que los demás modelos).
         """
-        import mlflow
         from utils.model_utils import AgeBaselineClassifier
         from utils.plots import plot_confusion_matrix, plot_precision_recall, plot_roc_curve
 
@@ -177,17 +159,22 @@ def process_etl_taskflow():
         experiment_id = create_experiment(experiment_name, model="baseline")
 
         logging.info("Creando modelo base...")
-        baseline_model = AgeBaselineClassifier(threshold=0.3)
+        X_train = pd.read_csv(X_train_path)
+        y_train_arr = pd.read_csv(y_train_path).to_numpy().ravel()
+        baseline_model = Pipeline(
+            [
+                ("preprocess", build_feature_pipeline()),
+                ("model", AgeBaselineClassifier(threshold=0.3)),
+            ]
+        ).fit(X_train, y_train_arr)
 
         logging.info("Evaluando modelo base con datos de validación...")
 
         X_val = pd.read_csv(X_val_path)
         y_val = pd.read_csv(y_val_path)
-        # convert to numpy arrays because AgeBaselineClassifier expects ndarray indexing (X[:, 0])
-        X_val_np = X_val.to_numpy()
         y_val_arr = y_val.to_numpy().ravel()
-        y_pred_baseline_val = baseline_model.predict(X_val_np)
-        y_prob_baseline_val = baseline_model.predict_proba(X_val_np)
+        y_pred_baseline_val = baseline_model.predict(X_val)
+        y_prob_baseline_val = baseline_model.predict_proba(X_val)
 
         bl_metrics = {
             "AUC-ROC": roc_auc_score(y_val_arr, y_prob_baseline_val[:, 1]),
@@ -205,22 +192,26 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_baseline_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_baseline_val[:, 1], save_path=None)
 
+        baseline_params = baseline_model.named_steps["model"].get_params()
+
         with mlflow.start_run(
             experiment_id=experiment_id,
             run_name=run_name_base,
             tags={"model": "baseline", "type": "evaluation"},
         ):
             logging.info("✅ Log de modelos del modelo base en MLflow")
-            #mlflow.sklearn.log_model(sk_model=baseline_model, name="baseline", registered_model_name=registered_model_name)
-            mlflow.sklearn.log_model(
+            model_info = mlflow.sklearn.log_model(
                 sk_model=baseline_model,
                 name="baseline",
                 registered_model_name=registered_model_name,
-                skops_trusted_types=["utils.model_utils.AgeBaselineClassifier"],
+                skops_trusted_types=[
+                    *PREPROCESS_TRUSTED_TYPES,
+                    "utils.model_utils.AgeBaselineClassifier",
+                ],
             )
-                    
+
             logging.info("✅ Parámetros del modelo base:")
-            mlflow.log_params(baseline_model.get_params())
+            mlflow.log_params(baseline_params)
 
             logging.info("✅ Métricas del modelo base registradas en MLflow")
             mlflow.log_metrics(bl_metrics)
@@ -234,10 +225,11 @@ def process_etl_taskflow():
         logging.info("✅ Tarea modelo base finalizada.")
         return {
             "metrics": bl_metrics,
-            "params": baseline_model.get_params(),
+            "params": baseline_params,
             "experiment_id": experiment_id,
             "run_name": run_name_base,
-            "registered_model_name": registered_model_name
+            "registered_model_name": registered_model_name,
+            "model_id": model_info.model_id,
         }
 
     @task.python(task_id="create_knn_model", multiple_outputs=True)
@@ -246,7 +238,6 @@ def process_etl_taskflow():
         Creamos un modelo KNN para comparar con el modelo entrenado posteriormente.
         En este caso, un clasificador que usa múltiples características como predictors.
         """
-        import mlflow
         import optuna
         from sklearn.neighbors import KNeighborsClassifier
         from utils.plots import plot_confusion_matrix, plot_precision_recall, plot_roc_curve
@@ -269,7 +260,12 @@ def process_etl_taskflow():
                 "weights": trial.suggest_categorical("weights", ["uniform", "distance"]),
                 "p": trial.suggest_categorical("p", [1, 2]),
             }
-            model = KNeighborsClassifier(n_jobs=-1, **params)
+            model = Pipeline(
+                [
+                    ("preprocess", build_feature_pipeline()),
+                    ("model", KNeighborsClassifier(n_jobs=-1, **params)),
+                ]
+            )
             return cv_f2(model, X_train, y_train_arr)
 
         knn_study = optuna.create_study(
@@ -279,7 +275,12 @@ def process_etl_taskflow():
         knn_study.optimize(knn_objective, n_trials=50, show_progress_bar=True)
 
         knn_best_params = knn_study.best_params
-        knn_best = KNeighborsClassifier(n_jobs=-1, **knn_best_params).fit(X_train, y_train_arr)
+        knn_best = Pipeline(
+            [
+                ("preprocess", build_feature_pipeline()),
+                ("model", KNeighborsClassifier(n_jobs=-1, **knn_best_params)),
+            ]
+        ).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo KNN creado.")
         logging.info("✅ Parámetros del modelo KNN:")
@@ -304,7 +305,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_knn_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_knn_val[:, 1], save_path=None)
 
-        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        # mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -313,19 +314,18 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo KNN en MLflow")
             mlflow.log_params(knn_best_params)
-            #mlflow.sklearn.log_model(sk_model=knn_best, name="knn", registered_model_name=registered_model_name)
-            mlflow.sklearn.log_model(
+            model_info = mlflow.sklearn.log_model(
                 sk_model=knn_best,
                 name="knn",
                 registered_model_name=registered_model_name,
                 skops_trusted_types=[
+                    *PREPROCESS_TRUSTED_TYPES,
                     "sklearn.metrics._dist_metrics.ManhattanDistance64",
                     "sklearn.metrics._dist_metrics.EuclideanDistance64",
                     "sklearn.neighbors._kd_tree.KDTree",
                     "sklearn.neighbors._ball_tree.BallTree",
                 ],
             )
-
 
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelos y métricas KNN registrados en MLflow")
@@ -340,6 +340,8 @@ def process_etl_taskflow():
             "params": knn_best_params,
             "experiment_id": experiment_id,
             "run_name": run_name_base,
+            "registered_model_name": registered_model_name,
+            "model_id": model_info.model_id,
         }
 
     @task.python(task_id="create_decision_tree_model", multiple_outputs=True)
@@ -348,7 +350,6 @@ def process_etl_taskflow():
         Creamos un modelo de árbol de decisión para comparar con el modelo entrenado posteriormente.
         En este caso, un clasificador que usa múltiples características como predictors.
         """
-        import mlflow
         import optuna
         from sklearn.tree import DecisionTreeClassifier
         from utils.plots import plot_confusion_matrix, plot_precision_recall, plot_roc_curve
@@ -374,7 +375,15 @@ def process_etl_taskflow():
                 "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
                 "criterion": trial.suggest_categorical("criterion", ["gini", "entropy"]),
             }
-            model = DecisionTreeClassifier(class_weight="balanced", random_state=42, **params)
+            model = Pipeline(
+                [
+                    ("preprocess", build_feature_pipeline()),
+                    (
+                        "model",
+                        DecisionTreeClassifier(class_weight="balanced", random_state=42, **params),
+                    ),
+                ]
+            )
             return cv_f2(model, X_train, y_train_arr)
 
         dt_study = optuna.create_study(
@@ -384,7 +393,17 @@ def process_etl_taskflow():
         dt_study.optimize(dt_objective, n_trials=50, show_progress_bar=True)
 
         dt_best_params = dt_study.best_params
-        dt_best = DecisionTreeClassifier(class_weight='balanced', random_state=42, **dt_best_params).fit(X_train, y_train_arr)
+        dt_best = Pipeline(
+            [
+                ("preprocess", build_feature_pipeline()),
+                (
+                    "model",
+                    DecisionTreeClassifier(
+                        class_weight="balanced", random_state=42, **dt_best_params
+                    ),
+                ),
+            ]
+        ).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo de árbol de decisión creado.")
 
@@ -411,7 +430,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_dt_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_dt_val[:, 1], save_path=None)
 
-        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        # mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -420,11 +439,12 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo de árbol de decisión en MLflow")
             mlflow.log_params(dt_best_params)
-            mlflow.sklearn.log_model(
+            model_info = mlflow.sklearn.log_model(
                 sk_model=dt_best,
                 name="decision_tree",
                 registered_model_name=registered_model_name,
                 skops_trusted_types=[
+                    *PREPROCESS_TRUSTED_TYPES,
                     "sklearn.tree._classes.DecisionTreeClassifier",
                     "sklearn.tree._tree.Tree",
                 ],
@@ -442,7 +462,8 @@ def process_etl_taskflow():
             "params": dt_best_params,
             "experiment_id": experiment_id,
             "run_name": run_name_base,
-            "registered_model_name": registered_model_name
+            "registered_model_name": registered_model_name,
+            "model_id": model_info.model_id,
         }
 
     @task.python(task_id="create_xgboost_model", multiple_outputs=True)
@@ -451,7 +472,6 @@ def process_etl_taskflow():
         Creamos un modelo de XGBoost para comparar con el modelo entrenado posteriormente.
         En este caso, un clasificador que usa múltiples características como predictors.
         """
-        import mlflow
         import numpy as np
         import optuna
         from utils.plots import plot_confusion_matrix, plot_precision_recall, plot_roc_curve
@@ -464,7 +484,7 @@ def process_etl_taskflow():
         logging.info(f"Usando experimento MLflow: xgboost_model_evaluation (ID: {experiment_id})")
         run_name_base = "xgboost_model_exp"
         registered_model_name = "xgboost_model"
-        
+
         X_train = pd.read_csv(X_train_path)
         y_train = pd.read_csv(y_train_path)
         y_train_arr = y_train.to_numpy().ravel()
@@ -481,13 +501,21 @@ def process_etl_taskflow():
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
             }
-            model = XGBClassifier(
-                scale_pos_weight=scale_pos,
-                eval_metric="aucpr",
-                random_state=42,
-                use_label_encoder=False,
-                n_jobs=1,
-                **params,
+            model = Pipeline(
+                [
+                    ("preprocess", build_feature_pipeline()),
+                    (
+                        "model",
+                        XGBClassifier(
+                            scale_pos_weight=scale_pos,
+                            eval_metric="aucpr",
+                            random_state=42,
+                            use_label_encoder=False,
+                            n_jobs=1,
+                            **params,
+                        ),
+                    ),
+                ]
             )
             return cv_f2(model, X_train, y_train_arr)
 
@@ -498,7 +526,22 @@ def process_etl_taskflow():
         xgb_study.optimize(xgb_objective, n_trials=50, show_progress_bar=True)
 
         xgb_best_params = xgb_study.best_params
-        xgb_best = XGBClassifier(**xgb_best_params).fit(X_train, y_train_arr)
+        xgb_best = Pipeline(
+            [
+                ("preprocess", build_feature_pipeline()),
+                (
+                    "model",
+                    XGBClassifier(
+                        scale_pos_weight=scale_pos,
+                        eval_metric="aucpr",
+                        random_state=42,
+                        use_label_encoder=False,
+                        n_jobs=1,
+                        **xgb_best_params,
+                    ),
+                ),
+            ]
+        ).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo de XGBoost creado.")
         logging.info("✅ Parámetros del modelo de XGBoost:")
@@ -523,7 +566,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_xgb_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_xgb_val[:, 1], save_path=None)
 
-        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        # mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -532,15 +575,17 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo XGBoost en MLflow")
             mlflow.log_params(xgb_best_params)
-            #mlflow.sklearn.log_model(
-            #    sk_model=xgb_best,
-            #    name="xgboost",
-            #    registered_model_name=registered_model_name
-            #)
-            mlflow.xgboost.log_model(
-            xgb_model=xgb_best,
-            name="xgboost",
-            registered_model_name=registered_model_name
+            # Se loguea el Pipeline completo con flavor sklearn para que la API
+            # pueda cargarlo con mlflow.sklearn.load_model si resulta campeón.
+            model_info = mlflow.sklearn.log_model(
+                sk_model=xgb_best,
+                name="xgboost",
+                registered_model_name=registered_model_name,
+                skops_trusted_types=[
+                    *PREPROCESS_TRUSTED_TYPES,
+                    "xgboost.sklearn.XGBClassifier",
+                    "xgboost.core.Booster",
+                ],
             )
             mlflow.log_metrics(bl_metrics)
             logging.info("✅ Modelo XGBoost y métricas registrados en MLflow")
@@ -555,7 +600,8 @@ def process_etl_taskflow():
             "params": xgb_best_params,
             "experiment_id": experiment_id,
             "run_name": run_name_base,
-            "registered_model_name": registered_model_name
+            "registered_model_name": registered_model_name,
+            "model_id": model_info.model_id,
         }
 
     @task.python(task_id="create_random_forest_model", multiple_outputs=True)
@@ -564,7 +610,6 @@ def process_etl_taskflow():
         Creamos un modelo de bosque aleatorio para comparar con el modelo entrenado posteriormente.
         En este caso, un clasificador que usa múltiples características como predictors.
         """
-        import mlflow
         import optuna
         from sklearn.ensemble import RandomForestClassifier
         from utils.plots import plot_confusion_matrix, plot_precision_recall, plot_roc_curve
@@ -590,10 +635,18 @@ def process_etl_taskflow():
                 "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 20),
                 "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", 0.5]),
             }
-            model = RandomForestClassifier(
-                class_weight="balanced", random_state=42, n_jobs=-1, **params
+            model = Pipeline(
+                [
+                    ("preprocess", build_feature_pipeline()),
+                    (
+                        "model",
+                        RandomForestClassifier(
+                            class_weight="balanced", random_state=42, n_jobs=-1, **params
+                        ),
+                    ),
+                ]
             )
-            return cv_f2(model, X_train, y_train)
+            return cv_f2(model, X_train, y_train_arr)
 
         rf_study = optuna.create_study(
             direction="maximize",
@@ -602,7 +655,17 @@ def process_etl_taskflow():
         rf_study.optimize(rf_objective, n_trials=50, show_progress_bar=True)
 
         rf_best_params = rf_study.best_params
-        rf_best = RandomForestClassifier(class_weight="balanced", random_state=42, n_jobs=-1, **rf_best_params).fit(X_train, y_train_arr)
+        rf_best = Pipeline(
+            [
+                ("preprocess", build_feature_pipeline()),
+                (
+                    "model",
+                    RandomForestClassifier(
+                        class_weight="balanced", random_state=42, n_jobs=-1, **rf_best_params
+                    ),
+                ),
+            ]
+        ).fit(X_train, y_train_arr)
 
         logging.info("✅ Modelo de bosque aleatorio creado.")
 
@@ -617,7 +680,7 @@ def process_etl_taskflow():
             "AUC-ROC": roc_auc_score(y_val_arr, y_prob_rf_val[:, 1]),
             "PR-AUC": average_precision_score(y_val_arr, y_prob_rf_val[:, 1]),
             "F1": f1_score(y_val_arr, y_pred_rf_val),
-            METRIC_NAME: cv_f2(rf_best, X_val, y_val_arr),
+            METRIC_NAME: fbeta_score(y_val_arr, y_pred_rf_val, beta=BETA),
             "Recall": recall_score(y_val_arr, y_pred_rf_val),
             "Precision": precision_score(y_val_arr, y_pred_rf_val, zero_division=0),
         }
@@ -626,7 +689,7 @@ def process_etl_taskflow():
         roc_plots = plot_roc_curve(y_val_arr, y_prob_rf_val, save_path=None)
         pr_plots = plot_precision_recall(y_val_arr, y_prob_rf_val[:, 1], save_path=None)
 
-        #mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+        # mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -635,11 +698,12 @@ def process_etl_taskflow():
         ):
             logging.info("✅ Log de modelo de random forest en MLflow")
             mlflow.log_params(rf_best_params)
-            mlflow.sklearn.log_model(
+            model_info = mlflow.sklearn.log_model(
                 sk_model=rf_best,
                 name="random_forest",
                 registered_model_name=registered_model_name,
                 skops_trusted_types=[
+                    *PREPROCESS_TRUSTED_TYPES,
                     "sklearn.ensemble._forest.RandomForestClassifier",
                     "sklearn.tree._classes.DecisionTreeClassifier",
                     "sklearn.tree._tree.Tree",
@@ -658,16 +722,20 @@ def process_etl_taskflow():
             "params": rf_best_params,
             "experiment_id": experiment_id,
             "run_name": run_name_base,
-            "registered_model_name": registered_model_name
+            "registered_model_name": registered_model_name,
+            "model_id": model_info.model_id,
         }
 
     @task.python(task_id="set_champion_model", multiple_outputs=True)
     def set_champion_model(metrics_base, metrics_knn, metrics_dt, metrics_xgb, metrics_rf):
         """
-        Comparamos los modelos entrenados y seleccionamos el mejor (champion) para producción.
-        """
-        import mlflow
+        Cierra el ciclo: compara los cinco modelos por F2 y promueve al ganador
+        como `champion` del modelo que sirve la API (stroke-model).
 
+        Cada modelo se entrenó como Pipeline completo (preprocessing + estimador),
+        así que el artefacto ganador es autónomo: la API lo carga con
+        mlflow.sklearn.load_model y recibe datos crudos sin cambios.
+        """
         mlflow = connect_mlflow()
 
         logging.info("Iniciando tarea de selección del modelo campeón...")
@@ -677,56 +745,43 @@ def process_etl_taskflow():
             ("knn", metrics_knn),
             ("decision_tree", metrics_dt),
             ("xgboost", metrics_xgb),
-            ("random_forest", metrics_rf)
+            ("random_forest", metrics_rf),
         ]
 
-        logging.info("Comparando modelos según la métrica principal (F-beta score)...")
-        _, champion_metrics = max(models, key=lambda x: x[1]["metrics"][METRIC_NAME])
+        logging.info(f"Comparando modelos según la métrica principal ({METRIC_NAME})...")
+        for name, m in models:
+            logging.info(f"  {name}: {METRIC_NAME}={m['metrics'][METRIC_NAME]:.4f}")
 
-        experiment_id = champion_metrics["experiment_id"]
-        run_name = champion_metrics["run_name"]
-        champion_model_name = champion_metrics["registered_model_name"]
+        champion_name, champion = max(models, key=lambda x: x[1]["metrics"][METRIC_NAME])
+        champion_f2 = champion["metrics"][METRIC_NAME]
+        winner_uri = f"models:/{champion['model_id']}"
 
-        logging.info(f"✅ Modelo campeón seleccionado: {champion_model_name} con {METRIC_NAME}: {champion_metrics["metrics"][METRIC_NAME]:.4f}")
-
-        logging.info("Registrando modelo campeón en MLflow Model Registry...")
-        
-        runs_champion= mlflow.search_runs(
-            experiment_ids=experiment_id,
-            filter_string=f"tags.mlflow.runName = '{run_name}'"   
+        logging.info(
+            f"✅ Modelo campeón: {champion_name} ({METRIC_NAME}={champion_f2:.4f}) → {winner_uri}"
         )
 
-        run_id = runs_champion["run_id"].iloc[0]
-
-        logging.info(f"Obteniendo run_id del modelo campeón: {experiment_id} - {run_id}")
-        logged_models = mlflow.search_logged_models(
-            experiment_ids=[experiment_id],
-            filter_string=f"source_run_id='{run_id}'"
-        )
-
-        model_uri = f"models:/{logged_models['model_id'].iloc[0]}"
-
-        remove_alias_from_models("champion")
-
+        # Registrar el Pipeline ganador como nueva versión del modelo que sirve la API
         client = mlflow.MlflowClient()
-
-        versions = client.search_model_versions(
-            f"name='{champion_model_name}'",
-            max_results=1,
-            order_by=["version_number DESC"],
+        mv = mlflow.register_model(winner_uri, SERVING_MODEL_NAME)
+        client.set_registered_model_alias(SERVING_MODEL_NAME, "champion", mv.version)
+        logging.info(
+            f"'{SERVING_MODEL_NAME}' v{mv.version} promovido a alias 'champion' "
+            f"(algoritmo ganador: {champion_name})"
         )
-        logging.info(f"Ultima version existentes del modelo campeón '{champion_model_name}': {versions[0].version if versions else 'No hay versiones'}")
-        if versions:
-            new_version = versions[0].version
-            client.set_registered_model_alias(champion_model_name, "champion", new_version)
-            logging.info(
-                f"Modelo '{champion_model_name}' v{new_version} promovido a alias 'champion'"
-            )
         logging.info("✅ Tarea de selección del modelo campeón finalizada.")
+
+        return {
+            "champion_algorithm": champion_name,
+            "champion_f2": champion_f2,
+            "serving_model": SERVING_MODEL_NAME,
+            "version": mv.version,
+        }
 
     # 🧩 Encadenamiento
     paths = check_data_to_process()
-    metrics_base = create_base_model(paths["X_val_path"], paths["y_val_path"])
+    metrics_base = create_base_model(
+        paths["X_train_path"], paths["y_train_path"], paths["X_val_path"], paths["y_val_path"]
+    )
     metrics_knn = create_knn_model(
         paths["X_train_path"], paths["y_train_path"], paths["X_val_path"], paths["y_val_path"]
     )

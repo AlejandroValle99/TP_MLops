@@ -1,5 +1,10 @@
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, roc_curve, PrecisionRecallDisplay
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    PrecisionRecallDisplay,
+    confusion_matrix,
+    roc_curve,
+)
 
 
 def plot_confusion_matrix(y_real, y_pred, save_path=None):
@@ -37,7 +42,6 @@ def plot_roc_curve(y_real, y_pred, num_class=2, save_path=None):
 
     fig_plots = []
     for i in range(num_class):
-
         y_real_temp = (y_real == i).astype(int)
         y_pred_temp = y_pred[:, i].flatten()
 
@@ -67,16 +71,16 @@ def plot_roc_curve(y_real, y_pred, num_class=2, save_path=None):
     # Prevemos que Matplotlib de mostrar el gráfico cada vez que llamamos a la función
     return fig_plots
 
+
 def plot_precision_recall(y_real, y_pred, save_path=None):
 
     # Chequeamos que los dataframes estén alineados
     if y_real.shape[0] != y_pred.shape[0]:
         raise ValueError("y_real and y_pred are not aligned")
 
-
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.grid(False)
-    PrecisionRecallDisplay.from_predictions(y_real, y_pred, name='Precision-Recall', ax=ax)
+    PrecisionRecallDisplay.from_predictions(y_real, y_pred, name="Precision-Recall", ax=ax)
     ax.set_title("Precision-Recall curve")
 
     plt.tight_layout()

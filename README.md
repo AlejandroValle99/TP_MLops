@@ -193,7 +193,18 @@ curl -X POST http://localhost:8000/predict \
 
 ## DAGs de Airflow
 
-El sistema tiene tres DAGs con propósitos distintos. Actualmente son independientes entre sí (ver [Próximos pasos](#próximos-pasos)).
+El sistema tiene un DAG orquestador (`0_stroke_full_pipeline`) que encadena las dos etapas de selección de modelo, más un DAG de producción independiente.
+
+### DAG orquestador: `0_stroke_full_pipeline`
+
+Encadena **limpieza → comparación** con `TriggerDagRunOperator` + `ExternalTaskSensor`:
+
+```
+stroke_data_cleaning ──▶ etl_train_models_process_taskflow
+   (split de datos)          (compara 5 modelos y promueve el champion)
+```
+
+La comparación deja directamente el modelo `champion` que sirve la API, así que no hay una etapa de "producción" separada dentro del orquestador.
 
 ### DAG 1: `stroke_prediction_pipeline` — producción
 
@@ -211,45 +222,47 @@ fetch_data ──▶ validate_data ──▶ train_model
 
 Este DAG es el pipeline "vivo". Para triggerearlo manualmente: **Airflow UI → stroke_prediction_pipeline → ▶ Trigger DAG**.
 
-### DAG 2: `stroke_data_cleaning` — ETL exploratorio
+### DAG 2: `stroke_data_cleaning` — partición de datos
 
-**Schedule**: ninguno (disparo manual).
+**Schedule**: ninguno (disparo manual o vía orquestador).
 
 ```
-validate_source ──▶ load_and_split ──▶ impute_bmi ──▶ encode_features ──▶ scale_features ──▶ upload_to_minio
+validate_source ──▶ split_and_upload
 ```
 
-Procesa el CSV local en 6 pasos independientes y persiste cada etapa en MinIO (`s3://mlflow-artifacts/processed/`). La particularidad es que cada paso escribe su resultado en S3 y el siguiente lo lee desde ahí, lo que permite inspeccionar intermedios y hace cada tarea reutilizable de forma independiente.
+Carga el CSV crudo con `model.preprocess.load_data` (la misma carga que usa el entrenamiento: drop de `id` y de filas `gender='Other'`), hace un split estratificado 60/20/20 y sube los 6 CSV **crudos** (X/y train/val/test) a `s3://mlflow-artifacts/processed/final/`.
 
-Produce los splits finales en `processed/final/` que usa el DAG 3.
+Tras unificar el preprocessing, este DAG ya **no** imputa/encoda/escala: esa lógica vive en un único lugar (`model/preprocess.py`) y se aplica dentro del Pipeline de cada modelo.
 
-### DAG 3: `etl_train_models_process_taskflow` — comparación de modelos
+### DAG 3: `etl_train_models_process_taskflow` — comparación y promoción
 
-**Schedule**: ninguno (disparo manual). **Requiere que el DAG 2 haya corrido antes.**
+**Schedule**: ninguno (disparo manual o vía orquestador). **Requiere que el DAG 2 haya corrido antes.**
 
 ```
 check_data_to_process ──▶ create_base_model  ──┐
                       ──▶ create_knn_model   ──┤
-                      ──▶ create_decision_tree ─┤──▶ (resultados en MLflow)
-                      ──▶ create_xgboost_model ─┤
+                      ──▶ create_decision_tree ─┤──▶ set_champion_model
+                      ──▶ create_xgboost_model ─┤   (promueve el ganador por F2)
                       ──▶ create_random_forest ─┘
 ```
 
-Lee los splits de `processed/final/`, entrena cinco modelos en paralelo con búsqueda de hiperparámetros via **Optuna** (50 trials cada uno) y loggea métricas, parámetros y gráficos de evaluación en MLflow. Está implementado con la **TaskFlow API** de Airflow.
+Lee los splits **crudos** de `processed/final/` y entrena cinco modelos en paralelo, cada uno como un `Pipeline([build_feature_pipeline(), estimador])`, con búsqueda de hiperparámetros vía **Optuna** (50 trials cada uno). Loggea métricas, parámetros y gráficos en MLflow. Está implementado con la **TaskFlow API**.
+
+Al final, `set_champion_model` compara los cinco por **F2**, registra al ganador como nueva versión de **`stroke-model`** y le asigna el alias **`champion`** — el mismo modelo que sirve la API. Como cada modelo es un Pipeline autónomo (lleva el preprocessing adentro), la API lo carga sin cambios aunque gane un algoritmo distinto.
 
 Los modelos que entrena son: baseline (solo edad), KNN, Decision Tree, XGBoost y Random Forest.
 
-### Flujo de los tres DAGs
+### Flujo
 
 ```
-[DAG 2] stroke_data_cleaning   →   [DAG 3] etl_train_models   →  comparar en MLflow
-         (manual, una vez)               (manual, una vez)           y elegir modelo
+[Orquestador] stroke_data_cleaning  →  etl_train_models_process_taskflow
+                  (split de datos)         (compara 5 modelos y promueve champion)
 
-[DAG 1] stroke_pipeline                                         →  mantiene el sistema
-         (automático, semanal)                                       actualizado
+[DAG 1] stroke_pipeline                 →  bootstrap/retrain del champion (RF fijo)
+         (manual)                             usado también por model-init al arranque
 ```
 
-Los DAGs 2 y 3 son herramientas de investigación para seleccionar el mejor modelo. El DAG 1 es el pipeline de producción que mantiene el modelo `champion` actualizado cada semana.
+El orquestador es la herramienta para **seleccionar y promover** el mejor modelo. El DAG 1 (`stroke_pipeline`) queda como camino rápido de reentrenamiento de un único Random Forest, y es lo que usa `model-init` para tener un `champion` disponible desde el arranque.
 
 ---
 
@@ -316,15 +329,13 @@ docker compose down -v
 
 ## Próximos pasos
 
-### Integración de los DAGs
+### Integración de los DAGs ✅
 
-Los tres DAGs son actualmente independientes. El DAG 1 tiene su propio preprocessing inline (`model/preprocess.py`) y no usa los datos que produce el DAG 2. El DAG 3 compara modelos pero ninguno de sus resultados impacta en el modelo `champion`.
+El pipeline ya es cohesivo de extremo a extremo:
 
-Para que el pipeline sea cohesivo de extremo a extremo:
-
-- **Encadenar DAG 2 → DAG 3**: agregar un `TriggerDagRunOperator` al final del DAG 2 para que el DAG 3 corra automáticamente cuando los datos estén listos
-- **Conectar DAG 3 con producción**: agregar una tarea al DAG 3 que evalúe el mejor modelo encontrado por Optuna y, si supera al `champion` actual en F2-score, lo promueva en el MLflow registry
-- **Unificar el preprocessing**: hacer que el DAG 1 consuma los datos procesados por el DAG 2 en lugar de tener su propio pipeline inline, de modo que todos los flujos usen exactamente la misma lógica de preprocesamiento
+- **Encadenado limpieza → comparación** mediante el DAG orquestador `0_stroke_full_pipeline`.
+- **Champion automático**: `set_champion_model` (DAG 3) promueve el ganador por F2 directamente sobre `stroke-model@champion`, que es lo que sirve la API.
+- **Preprocessing unificado**: hay una única implementación (`model/preprocess.py::build_feature_pipeline`), usada tanto por el entrenamiento de producción como dentro del Pipeline de cada modelo del DAG 3. El DAG 2 ya no preprocesa: solo particiona datos crudos.
 
 ### Otras mejoras
 
